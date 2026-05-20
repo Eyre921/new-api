@@ -129,7 +129,18 @@ func calculateTextToolCallSurcharge(ctx *gin.Context, relayInfo *relaycommon.Rel
 	}
 
 	if ctx.GetBool("image_generation_call") {
-		summary.ImageGenerationCallPrice = operation_setting.GetGPTImage1PriceOnceCall(ctx.GetString("image_generation_call_quality"), ctx.GetString("image_generation_call_size"))
+		imageModel := ctx.GetString("image_generation_call_model")
+		// Responses API 场景下 model 来自 response.tools[].model（如 gpt-image-2），
+		// 直接 Image API 场景下 model 字段为空 —— 此时用请求模型名兜底，
+		// 保证 /v1/images/generations 这条路径也能享受 ModelPrice 配置。
+		if imageModel == "" && relayInfo != nil {
+			imageModel = relayInfo.OriginModelName
+		}
+		summary.ImageGenerationCallPrice = ResolveImageGenPrice(
+			imageModel,
+			ctx.GetString("image_generation_call_quality"),
+			ctx.GetString("image_generation_call_size"),
+		)
 		surcharge = surcharge.Add(decimal.NewFromFloat(summary.ImageGenerationCallPrice).
 			Mul(dGroupRatio).
 			Mul(dQuotaPerUnit))

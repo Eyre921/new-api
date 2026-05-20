@@ -38,6 +38,7 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		c.Set("image_generation_call", true)
 		c.Set("image_generation_call_quality", responsesResponse.GetQuality())
 		c.Set("image_generation_call_size", responsesResponse.GetSize())
+		c.Set("image_generation_call_model", responsesResponse.GetImageModel())
 	}
 
 	// 写入新的 response body
@@ -110,6 +111,7 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 					c.Set("image_generation_call", true)
 					c.Set("image_generation_call_quality", streamResponse.Response.GetQuality())
 					c.Set("image_generation_call_size", streamResponse.Response.GetSize())
+					c.Set("image_generation_call_model", streamResponse.Response.GetImageModel())
 				}
 			}
 		case "response.output_text.delta":

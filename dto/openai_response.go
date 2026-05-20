@@ -333,6 +333,22 @@ func (o *OpenAIResponsesResponse) GetSize() string {
 	return ""
 }
 
+// GetImageModel 返回 Responses API 内部使用的图片生成模型名（如 gpt-image-2）。
+// 文本模型（如 gpt-5.5）通过 image_generation tool 触发图片生成时，上游会在
+// response.tools[].model 暴露真实的底层图片模型。用于按模型名查 ModelPrice。
+func (o *OpenAIResponsesResponse) GetImageModel() string {
+	for _, t := range o.Tools {
+		typ, _ := t["type"].(string)
+		if typ != "image_generation" {
+			continue
+		}
+		if m, ok := t["model"].(string); ok && m != "" {
+			return m
+		}
+	}
+	return ""
+}
+
 type IncompleteDetails struct {
 	Reasoning string `json:"reasoning"`
 }

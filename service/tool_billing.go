@@ -14,6 +14,7 @@ type ToolCallUsage struct {
 	WebSearchToolName      string // "web_search_preview", "web_search", etc.
 	FileSearchCalls        int
 	ImageGenerationCall    bool
+	ImageGenerationModel   string // 上游响应中 response.tools[].model（如 gpt-image-2）
 	ImageGenerationQuality string
 	ImageGenerationSize    string
 }
@@ -69,7 +70,13 @@ func ComputeToolCallQuota(usage ToolCallUsage, groupRatio float64) ToolCallResul
 	}
 
 	if usage.ImageGenerationCall {
-		price := operation_setting.GetGPTImage1PriceOnceCall(usage.ImageGenerationQuality, usage.ImageGenerationSize)
+		// 与 text_quota.go 中的图片计费查找规则保持一致：
+		// 优先查 ModelPrice（gpt-image-2:high / gpt-image-2），找不到再走旧硬编码。
+		imageModel := usage.ImageGenerationModel
+		if imageModel == "" {
+			imageModel = usage.ModelName
+		}
+		price := ResolveImageGenPrice(imageModel, usage.ImageGenerationQuality, usage.ImageGenerationSize)
 		quota := int(math.Round(price * common.QuotaPerUnit * groupRatio))
 		items = append(items, ToolCallItem{
 			Name:       "image_generation",

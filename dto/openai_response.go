@@ -267,29 +267,47 @@ type OutputTokenDetails struct {
 	ReasoningTokens int `json:"reasoning_tokens"`
 }
 
+// ResponsesImageGenUsage 是 Responses API 响应中 image_generation tool 的 token 用量。
+// 上游会单独统计图片生成部分的 token，与外层 `usage`（文本模型的 token）解耦。
+type ResponsesImageGenUsage struct {
+	InputTokens         int                 `json:"input_tokens"`
+	InputTokensDetails  *InputTokenDetails  `json:"input_tokens_details,omitempty"`
+	OutputTokens        int                 `json:"output_tokens"`
+	OutputTokensDetails *OutputTokenDetails `json:"output_tokens_details,omitempty"`
+	TotalTokens         int                 `json:"total_tokens"`
+}
+
+// ResponsesToolUsage 是 Responses API 响应中各类 built-in tool 的用量聚合。
+// 当前只关注 ImageGen，其他字段保留 RawMessage 以便后续扩展。
+type ResponsesToolUsage struct {
+	ImageGen  *ResponsesImageGenUsage `json:"image_gen,omitempty"`
+	WebSearch json.RawMessage         `json:"web_search,omitempty"`
+}
+
 type OpenAIResponsesResponse struct {
-	ID                 string             `json:"id"`
-	Object             string             `json:"object"`
-	CreatedAt          int                `json:"created_at"`
-	Status             json.RawMessage    `json:"status"`
-	Error              any                `json:"error,omitempty"`
-	IncompleteDetails  *IncompleteDetails `json:"incomplete_details,omitempty"`
-	Instructions       json.RawMessage    `json:"instructions"`
-	MaxOutputTokens    int                `json:"max_output_tokens"`
-	Model              string             `json:"model"`
-	Output             []ResponsesOutput  `json:"output"`
-	ParallelToolCalls  bool               `json:"parallel_tool_calls"`
-	PreviousResponseID json.RawMessage    `json:"previous_response_id"`
-	Reasoning          *Reasoning         `json:"reasoning"`
-	Store              bool               `json:"store"`
-	Temperature        float64            `json:"temperature"`
-	ToolChoice         json.RawMessage    `json:"tool_choice"`
-	Tools              []map[string]any   `json:"tools"`
-	TopP               float64            `json:"top_p"`
-	Truncation         json.RawMessage    `json:"truncation"`
-	Usage              *Usage             `json:"usage"`
-	User               json.RawMessage    `json:"user"`
-	Metadata           json.RawMessage    `json:"metadata"`
+	ID                 string              `json:"id"`
+	Object             string              `json:"object"`
+	CreatedAt          int                 `json:"created_at"`
+	Status             json.RawMessage     `json:"status"`
+	Error              any                 `json:"error,omitempty"`
+	IncompleteDetails  *IncompleteDetails  `json:"incomplete_details,omitempty"`
+	Instructions       json.RawMessage     `json:"instructions"`
+	MaxOutputTokens    int                 `json:"max_output_tokens"`
+	Model              string              `json:"model"`
+	Output             []ResponsesOutput   `json:"output"`
+	ParallelToolCalls  bool                `json:"parallel_tool_calls"`
+	PreviousResponseID json.RawMessage     `json:"previous_response_id"`
+	Reasoning          *Reasoning          `json:"reasoning"`
+	Store              bool                `json:"store"`
+	Temperature        float64             `json:"temperature"`
+	ToolChoice         json.RawMessage     `json:"tool_choice"`
+	Tools              []map[string]any    `json:"tools"`
+	TopP               float64             `json:"top_p"`
+	Truncation         json.RawMessage     `json:"truncation"`
+	Usage              *Usage              `json:"usage"`
+	ToolUsage          *ResponsesToolUsage `json:"tool_usage,omitempty"`
+	User               json.RawMessage     `json:"user"`
+	Metadata           json.RawMessage     `json:"metadata"`
 }
 
 // GetOpenAIError 从动态错误类型中提取OpenAIError结构
@@ -331,6 +349,24 @@ func (o *OpenAIResponsesResponse) GetSize() string {
 		}
 	}
 	return ""
+}
+
+// GetImageGenInputTokens 返回 image_generation tool 上游统计的 input tokens。
+// 用于按 token 计费时的 promptTokens 维度。
+func (o *OpenAIResponsesResponse) GetImageGenInputTokens() int {
+	if o.ToolUsage == nil || o.ToolUsage.ImageGen == nil {
+		return 0
+	}
+	return o.ToolUsage.ImageGen.InputTokens
+}
+
+// GetImageGenOutputTokens 返回 image_generation tool 上游统计的 output tokens
+// （即图片输出的 token 数，质量越高数值越大）。用于按 token 计费时的 completionTokens 维度。
+func (o *OpenAIResponsesResponse) GetImageGenOutputTokens() int {
+	if o.ToolUsage == nil || o.ToolUsage.ImageGen == nil {
+		return 0
+	}
+	return o.ToolUsage.ImageGen.OutputTokens
 }
 
 // GetImageModel 返回 Responses API 内部使用的图片生成模型名（如 gpt-image-2）。

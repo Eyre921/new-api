@@ -53,7 +53,8 @@ type textQuotaSummary struct {
 	FileSearchPrice          float64
 	FileSearchCallCount      int
 	AudioInputPrice          float64
-	ImageGenerationCallPrice float64
+	ImageGenerationCallPrice float64                // 按次模式下记录单价；按 token 模式为 0，详细见 ImageGenBilling
+	ImageGenBilling          *ImageGenBillingResult // 完整 image_generation 计费明细（per_call / by_token / fallback）
 	ToolCallSurchargeQuota   decimal.Decimal
 }
 
@@ -132,18 +133,25 @@ func calculateTextToolCallSurcharge(ctx *gin.Context, relayInfo *relaycommon.Rel
 		imageModel := ctx.GetString("image_generation_call_model")
 		// Responses API 场景下 model 来自 response.tools[].model（如 gpt-image-2），
 		// 直接 Image API 场景下 model 字段为空 —— 此时用请求模型名兜底，
-		// 保证 /v1/images/generations 这条路径也能享受 ModelPrice 配置。
+		// 保证 /v1/images/generations 这条路径也能享受 ModelPrice / ModelRatio 配置。
 		if imageModel == "" && relayInfo != nil {
 			imageModel = relayInfo.OriginModelName
 		}
-		summary.ImageGenerationCallPrice = ResolveImageGenPrice(
+		billing := ComputeImageGenQuota(
 			imageModel,
 			ctx.GetString("image_generation_call_quality"),
 			ctx.GetString("image_generation_call_size"),
+			ctx.GetInt("image_generation_call_input_tokens"),
+			ctx.GetInt("image_generation_call_output_tokens"),
+			summary.GroupRatio,
 		)
-		surcharge = surcharge.Add(decimal.NewFromFloat(summary.ImageGenerationCallPrice).
-			Mul(dGroupRatio).
-			Mul(dQuotaPerUnit))
+		summary.ImageGenBilling = &billing
+		// 按次模式下回填 ImageGenerationCallPrice 以兼容既有日志字段；
+		// 按 token 模式下该字段为 0，详细信息走 ImageGenBilling。
+		if billing.Mode != ImageGenBillingByToken {
+			summary.ImageGenerationCallPrice = billing.PerCallPrice
+		}
+		surcharge = surcharge.Add(decimal.NewFromInt(int64(billing.Quota)))
 	}
 
 	return surcharge
@@ -369,7 +377,12 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	if summary.AudioInputPrice > 0 && summary.AudioTokens > 0 {
 		extraContent = append(extraContent, fmt.Sprintf("Audio Input 花费 %s", decimal.NewFromFloat(summary.AudioInputPrice).Div(decimal.NewFromInt(1000000)).Mul(decimal.NewFromInt(int64(summary.AudioTokens))).Mul(decimal.NewFromFloat(summary.GroupRatio)).Mul(decimal.NewFromFloat(common.QuotaPerUnit)).String()))
 	}
-	if summary.ImageGenerationCallPrice > 0 {
+	if summary.ImageGenBilling != nil {
+		// 新路径：日志展示完整的计费明细（按次 / 按 token / 兜底 + 实际 quota）。
+		extraContent = append(extraContent, FormatImageGenBillingLog(*summary.ImageGenBilling))
+	} else if summary.ImageGenerationCallPrice > 0 {
+		// 兼容路径：理论上不会触发（ComputeImageGenQuota 总会写入 ImageGenBilling），
+		// 仅作为防御保留旧版日志格式。
 		extraContent = append(extraContent, fmt.Sprintf("Image Generation Call 花费 %s", decimal.NewFromFloat(summary.ImageGenerationCallPrice).Mul(decimal.NewFromFloat(summary.GroupRatio)).Mul(decimal.NewFromFloat(common.QuotaPerUnit)).String()))
 	}
 
@@ -436,7 +449,28 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		other["audio_input_token_count"] = summary.AudioTokens
 		other["audio_input_price"] = summary.AudioInputPrice
 	}
-	if summary.ImageGenerationCallPrice > 0 {
+	if summary.ImageGenBilling != nil {
+		b := summary.ImageGenBilling
+		other["image_generation_call"] = true
+		other["image_generation_call_mode"] = string(b.Mode)
+		other["image_generation_call_quota"] = b.Quota
+		other["image_generation_call_model"] = b.Model
+		if b.Quality != "" {
+			other["image_generation_call_quality"] = b.Quality
+		}
+		if b.Size != "" {
+			other["image_generation_call_size"] = b.Size
+		}
+		switch b.Mode {
+		case ImageGenBillingByToken:
+			other["image_generation_call_input_tokens"] = b.InputTokens
+			other["image_generation_call_output_tokens"] = b.OutputTokens
+			other["image_generation_call_model_ratio"] = b.ModelRatio
+			other["image_generation_call_completion_ratio"] = b.CompletionRatio
+		default:
+			other["image_generation_call_price"] = b.PerCallPrice
+		}
+	} else if summary.ImageGenerationCallPrice > 0 {
 		other["image_generation_call"] = true
 		other["image_generation_call_price"] = summary.ImageGenerationCallPrice
 	}

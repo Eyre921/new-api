@@ -70,22 +70,28 @@ func ComputeToolCallQuota(usage ToolCallUsage, groupRatio float64) ToolCallResul
 	}
 
 	if usage.ImageGenerationCall {
-		// 与 text_quota.go 中的图片计费查找规则保持一致：
-		// 优先查 ModelPrice（gpt-image-2:high / gpt-image-2），找不到再走旧硬编码。
+		// 与 text_quota.go 的统一计费逻辑对齐（ModelPrice → ModelRatio → 兜底）。
+		// 这里没有 image_gen 的 token 信息（ToolCallUsage 暂未携带），
+		// 因此 by_token 分支不会命中；按次和兜底分支与 text_quota.go 完全一致。
 		imageModel := usage.ImageGenerationModel
 		if imageModel == "" {
 			imageModel = usage.ModelName
 		}
-		price := ResolveImageGenPrice(imageModel, usage.ImageGenerationQuality, usage.ImageGenerationSize)
-		quota := int(math.Round(price * common.QuotaPerUnit * groupRatio))
+		billing := ComputeImageGenQuota(
+			imageModel,
+			usage.ImageGenerationQuality,
+			usage.ImageGenerationSize,
+			0, 0,
+			groupRatio,
+		)
 		items = append(items, ToolCallItem{
 			Name:       "image_generation",
 			CallCount:  1,
-			PricePer1K: price,
-			TotalPrice: price,
-			Quota:      quota,
+			PricePer1K: billing.PerCallPrice,
+			TotalPrice: billing.PerCallPrice,
+			Quota:      billing.Quota,
 		})
-		totalQuota += quota
+		totalQuota += billing.Quota
 	}
 
 	return ToolCallResult{

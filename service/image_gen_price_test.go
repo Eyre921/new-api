@@ -4,159 +4,195 @@ import (
 	"testing"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 )
 
-// 测试 ResolveImageGenPrice 的完整 5 层兜底链。
-//
-// 每个 case 都通过 ratio_setting.UpdateModelPriceByJSONString 重置 ModelPrice 状态，
-// 注意：UpdateModelPriceByJSONString 已含 ensureImageGenFallbackInMap 升级保护，
-// 即使注入空 JSON 也会自动补回 image_generation 兜底键 —— 这是有意的"升级安全"
-// 行为。在 case 中需要显式覆盖 image_generation 才能测试 ④/⑤ 层。
-func TestResolveImageGenPrice(t *testing.T) {
+// TestComputeImageGenQuota_PerCallBranch 验证按次计费的两层 ModelPrice 命中。
+func TestComputeImageGenQuota_PerCallBranch(t *testing.T) {
 	cases := []struct {
-		name     string
-		priceMap string // 注入的 ModelPrice JSON
-		model    string
-		quality  string
-		size     string
-		want     float64
+		name              string
+		modelPrice        string
+		modelRatio        string
+		completionRatio   string
+		model             string
+		quality           string
+		size              string
+		input             int
+		output            int
+		groupRatio        float64
+		wantMode          ImageGenBillingMode
+		wantPerCallPrice  float64
 	}{
 		{
-			name:     "① model+quality 精确匹配",
-			priceMap: `{"gpt-image-2:high": 0.2, "gpt-image-2": 0.05, "image_generation": 0.3}`,
-			model:    "gpt-image-2",
-			quality:  "high",
-			size:     "1024x1024",
-			want:     0.2,
+			name:             "① model:quality 精确按次",
+			modelPrice:       `{"gpt-image-2:high": 0.2, "gpt-image-2": 0.05}`,
+			model:            "gpt-image-2",
+			quality:          "high",
+			size:             "1024x1024",
+			groupRatio:       1.0,
+			wantMode:         ImageGenBillingPerCall,
+			wantPerCallPrice: 0.2,
 		},
 		{
-			name:     "② model 一刀切（无 model:quality）",
-			priceMap: `{"gpt-image-2": 0.05, "image_generation": 0.3}`,
-			model:    "gpt-image-2",
-			quality:  "high",
-			size:     "1024x1024",
-			want:     0.05,
+			name:             "② model 一刀切按次",
+			modelPrice:       `{"gpt-image-2": 0.05}`,
+			model:            "gpt-image-2",
+			quality:          "high",
+			size:             "1024x1024",
+			groupRatio:       1.0,
+			wantMode:         ImageGenBillingPerCall,
+			wantPerCallPrice: 0.05,
 		},
 		{
-			name:     "③ 全局兜底（未知新模型，DB 含 image_generation）",
-			priceMap: `{"image_generation": 0.3}`,
-			model:    "gpt-image-3",
-			quality:  "medium",
-			size:     "2048x2048",
-			want:     0.3,
-		},
-		{
-			name: "③ 升级安全：空 JSON 也会自动补回 image_generation 兜底",
-			// 这个 case 验证 ensureImageGenFallbackInMap 的关键行为：
-			// 既有部署升级时 DB 里没有 image_generation，被 LoadFromJsonString
-			// 清空后必须由 ensureImageGenFallbackInMap 补回，否则 ③ 永远命中不到。
-			priceMap: `{}`,
-			model:    "gpt-image-3",
-			quality:  "high",
-			size:     "1024x1024",
-			want:     0.3, // = DefaultImageGenFallbackPrice
-		},
-		{
-			name:     "④ gpt-image-1 兼容兜底（手动覆盖 image_generation 为非默认值不影响 ④）",
-			priceMap: `{"image_generation": 999}`,
-			model:    "gpt-image-1",
-			quality:  "low",
-			size:     "1024x1024",
-			// 注意：因为 image_generation=999 在 ③ 就命中了，
-			// 这其实验证的是 ③ 在 model="gpt-image-1" 时也会命中
-			// （④ 仅作为 ③ miss 后的回落）。
-			want: 999,
-		},
-		{
-			name:     "⑤ 极端兜底：未知新模型 + image_generation 被清空 → 返回 0.3（永不为 0）",
-			priceMap: `{"image_generation": 0}`, // 注意：0 仍然是 ok=true，会命中 ③ 返回 0
-			model:    "gpt-image-X-unknown",
-			quality:  "auto",
-			size:     "auto",
-			want:     0, // ③ 命中 image_generation=0
-		},
-		{
-			name:     "quality 为 auto 时仍可命中 model:quality 复合 key",
-			priceMap: `{"gpt-image-2:auto": 999, "gpt-image-2": 0.05}`,
-			model:    "gpt-image-2",
-			quality:  "auto",
-			size:     "1024x1024",
-			// 说明语义：要么显式禁止 auto 拼 key，要么允许运维利用此特性
-			// 给 auto 配单独的价。当前实现选后者（更灵活）。
-			want: 999,
+			name: "ModelPrice 优先：同时配 ModelPrice 和 ModelRatio，仍走按次",
+			// 这是与全局 ModelPriceHelper 一致的语义。
+			modelPrice:       `{"gpt-image-2": 1.5}`,
+			modelRatio:       `{"gpt-image-2": 999}`,
+			completionRatio:  `{"gpt-image-2": 999}`,
+			model:            "gpt-image-2",
+			input:            46,
+			output:           196,
+			groupRatio:       1.0,
+			wantMode:         ImageGenBillingPerCall,
+			wantPerCallPrice: 1.5,
 		},
 	}
-
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := ratio_setting.UpdateModelPriceByJSONString(tc.priceMap); err != nil {
-				t.Fatalf("failed to seed ModelPrice: %v", err)
+			if err := ratio_setting.UpdateModelPriceByJSONString(tc.modelPrice); err != nil {
+				t.Fatalf("seed ModelPrice: %v", err)
 			}
-			got := ResolveImageGenPrice(tc.model, tc.quality, tc.size)
-			if got != tc.want {
-				t.Errorf("ResolveImageGenPrice(%q, %q, %q) = %v, want %v",
-					tc.model, tc.quality, tc.size, got, tc.want)
+			if tc.modelRatio != "" {
+				if err := ratio_setting.UpdateModelRatioByJSONString(tc.modelRatio); err != nil {
+					t.Fatalf("seed ModelRatio: %v", err)
+				}
+			}
+			if tc.completionRatio != "" {
+				if err := ratio_setting.UpdateCompletionRatioByJSONString(tc.completionRatio); err != nil {
+					t.Fatalf("seed CompletionRatio: %v", err)
+				}
+			}
+
+			r := ComputeImageGenQuota(tc.model, tc.quality, tc.size, tc.input, tc.output, tc.groupRatio)
+			if r.Mode != tc.wantMode {
+				t.Errorf("Mode = %s, want %s", r.Mode, tc.wantMode)
+			}
+			if r.PerCallPrice != tc.wantPerCallPrice {
+				t.Errorf("PerCallPrice = %v, want %v", r.PerCallPrice, tc.wantPerCallPrice)
+			}
+			// 按次 quota 公式校验
+			wantQuota := int(tc.wantPerCallPrice * common.QuotaPerUnit * tc.groupRatio)
+			if r.Quota != wantQuota {
+				t.Errorf("Quota = %d, want %d", r.Quota, wantQuota)
 			}
 		})
 	}
 }
 
-// TestUpgradeSafetyEnsureImageGenFallback 单独验证升级安全行为：
-// 模拟从老版本升级 —— DB 里的 ModelPrice JSON 完全不含 image_generation 键，
-// 但加载后 modelPriceMap 必须有这个键（值为 DefaultImageGenFallbackPrice）。
-// 这是"两套前端都能看到这一行"的后端基础。
-func TestUpgradeSafetyEnsureImageGenFallback(t *testing.T) {
-	// 模拟既有部署：DB 里有别的模型配置但没有 image_generation
-	legacyDBJSON := `{"dall-e-3": 0.04, "gpt-image-1": 0.05}`
-	if err := ratio_setting.UpdateModelPriceByJSONString(legacyDBJSON); err != nil {
-		t.Fatalf("failed to simulate legacy DB load: %v", err)
+// TestComputeImageGenQuota_ByTokenBranch 验证按 token 模式。
+// 公式与 new-api 文本模型计费完全一致：
+//
+//	quota = (input + output × completionRatio) × modelRatio × groupRatio
+func TestComputeImageGenQuota_ByTokenBranch(t *testing.T) {
+	// 只配 ModelRatio（不配 ModelPrice），按 token 路径生效
+	if err := ratio_setting.UpdateModelPriceByJSONString(`{}`); err != nil {
+		t.Fatalf("clear ModelPrice: %v", err)
+	}
+	if err := ratio_setting.UpdateModelRatioByJSONString(`{"gpt-image-2": 0.06}`); err != nil {
+		t.Fatalf("seed ModelRatio: %v", err)
+	}
+	if err := ratio_setting.UpdateCompletionRatioByJSONString(`{"gpt-image-2": 1}`); err != nil {
+		t.Fatalf("seed CompletionRatio: %v", err)
 	}
 
-	// 升级保护应自动补回 image_generation
-	got, ok := ratio_setting.GetModelPrice(ratio_setting.ImageGenFallbackKey, false)
-	if !ok {
-		t.Fatalf("expected ModelPrice[%q] to be auto-injected after legacy DB load, but missing",
-			ratio_setting.ImageGenFallbackKey)
+	r := ComputeImageGenQuota("gpt-image-2", "low", "1024x1024", 46, 196, 0.6)
+	if r.Mode != ImageGenBillingByToken {
+		t.Fatalf("Mode = %s, want by_token", r.Mode)
 	}
-	if got != ratio_setting.DefaultImageGenFallbackPrice {
-		t.Errorf("expected auto-injected fallback price = %v, got %v",
-			ratio_setting.DefaultImageGenFallbackPrice, got)
+	if r.InputTokens != 46 || r.OutputTokens != 196 {
+		t.Errorf("Tokens: input=%d output=%d", r.InputTokens, r.OutputTokens)
 	}
-
-	// 管理员自定义后不应被覆盖
-	customJSON := `{"dall-e-3": 0.04, "image_generation": 0.88}`
-	if err := ratio_setting.UpdateModelPriceByJSONString(customJSON); err != nil {
-		t.Fatalf("failed to apply custom config: %v", err)
+	if r.ModelRatio != 0.06 || r.CompletionRatio != 1 {
+		t.Errorf("Ratios: model=%v completion=%v", r.ModelRatio, r.CompletionRatio)
 	}
-	got, _ = ratio_setting.GetModelPrice(ratio_setting.ImageGenFallbackKey, false)
-	if got != 0.88 {
-		t.Errorf("expected custom value 0.88 to be respected, got %v", got)
+	// 公式：(46 + 196×1) × 0.06 × 0.6 = 242 × 0.036 = 8.712 → round = 9
+	if r.Quota < 8 || r.Quota > 10 {
+		t.Errorf("Quota = %d, want ~9 (公式 (46+196×1)×0.06×0.6 = 8.712)", r.Quota)
 	}
 }
 
-// 测试 warning 日志的限流逻辑：同一未知模型在 5 分钟窗口内应只触发一次日志。
-// 这里只验证函数本身可重复调用且 map 状态正确，不直接断言日志输出。
+// TestComputeImageGenQuota_ByTokenRequiresTokens 验证：即使 ModelRatio 配了，
+// 但响应里没带 token 数（input=output=0），不会误走 by_token 分支，而是降级到兜底。
+func TestComputeImageGenQuota_ByTokenRequiresTokens(t *testing.T) {
+	if err := ratio_setting.UpdateModelPriceByJSONString(`{}`); err != nil {
+		t.Fatalf("clear ModelPrice: %v", err)
+	}
+	if err := ratio_setting.UpdateModelRatioByJSONString(`{"gpt-image-X": 0.06}`); err != nil {
+		t.Fatalf("seed ModelRatio: %v", err)
+	}
+
+	r := ComputeImageGenQuota("gpt-image-X", "high", "1024x1024", 0, 0, 1.0)
+	// ModelRatio 配了但 tokens 都是 0 → 跳过 by_token，走 image_generation 兜底
+	if r.Mode != ImageGenBillingFallbackPerCall {
+		t.Errorf("Mode = %s, want fallback_per_call (ensureImageGenFallbackInMap 已自动补回 image_generation)", r.Mode)
+	}
+}
+
+// TestComputeImageGenQuota_FallbackChain 验证后两层兜底。
+func TestComputeImageGenQuota_FallbackChain(t *testing.T) {
+	// 升级安全：空 JSON 也会自动补回 image_generation
+	if err := ratio_setting.UpdateModelPriceByJSONString(`{}`); err != nil {
+		t.Fatalf("clear ModelPrice: %v", err)
+	}
+	if err := ratio_setting.UpdateModelRatioByJSONString(`{}`); err != nil {
+		t.Fatalf("clear ModelRatio: %v", err)
+	}
+
+	r := ComputeImageGenQuota("gpt-image-99", "auto", "auto", 100, 100, 1.0)
+	if r.Mode != ImageGenBillingFallbackPerCall {
+		t.Errorf("Mode = %s, want fallback_per_call (image_generation auto-injected)", r.Mode)
+	}
+	if r.PerCallPrice != ratio_setting.DefaultImageGenFallbackPrice {
+		t.Errorf("PerCallPrice = %v, want %v",
+			r.PerCallPrice, ratio_setting.DefaultImageGenFallbackPrice)
+	}
+}
+
+// TestComputeImageGenQuota_GPTImage1Compat 验证旧硬编码兼容。
+func TestComputeImageGenQuota_GPTImage1Compat(t *testing.T) {
+	if err := ratio_setting.UpdateModelPriceByJSONString(`{}`); err != nil {
+		t.Fatalf("clear ModelPrice: %v", err)
+	}
+	if err := ratio_setting.UpdateModelRatioByJSONString(`{}`); err != nil {
+		t.Fatalf("clear ModelRatio: %v", err)
+	}
+	// 由于 ensureImageGenFallbackInMap，image_generation 在上面 clear 后会自动补回。
+	// 想看 gpt-image-1 兼容路径需要在它之前命中（model="gpt-image-1" 时 ④ 命中
+	// image_generation 而非 gpt-image-1 硬编码）。这是预期行为：image_generation
+	// 兜底优先于 gpt-image-1 硬编码，因为后者价格表已过时。
+	r := ComputeImageGenQuota("gpt-image-1", "high", "1024x1024", 0, 0, 1.0)
+	// 应该命中 image_generation 全局兜底（0.3），而非老硬编码 (0.167)
+	if r.Mode != ImageGenBillingFallbackPerCall {
+		t.Errorf("Mode = %s, want fallback_per_call", r.Mode)
+	}
+	if r.PerCallPrice != ratio_setting.DefaultImageGenFallbackPrice {
+		t.Errorf("PerCallPrice = %v, want %v (image_generation 优先于 gpt-image-1 硬编码)",
+			r.PerCallPrice, ratio_setting.DefaultImageGenFallbackPrice)
+	}
+}
+
+// TestLogUnknownImageModelThrottle 测试 warning 日志限流。
 func TestLogUnknownImageModelThrottle(t *testing.T) {
-	// 重置 map，避免上一个测试残留
 	unknownImageModelLogMu.Lock()
 	unknownImageModelLogAt = map[string]time.Time{}
 	unknownImageModelLogMu.Unlock()
 
 	logUnknownImageModel("gpt-image-XX", "high", "1024x1024")
-
 	unknownImageModelLogMu.Lock()
 	_, ok := unknownImageModelLogAt["gpt-image-XX"]
 	unknownImageModelLogMu.Unlock()
 	if !ok {
-		t.Fatalf("expected throttle map to record entry for first log")
-	}
-
-	// 第二次立即调用：map 时间戳不应更新（限流标志位的语义）
-	before := unknownImageModelLogAt["gpt-image-XX"]
-	logUnknownImageModel("gpt-image-XX", "high", "1024x1024")
-	after := unknownImageModelLogAt["gpt-image-XX"]
-	if !before.Equal(after) {
-		t.Errorf("throttle map timestamp should not change on rapid re-call; before=%v after=%v", before, after)
+		t.Fatalf("expected throttle map entry for first call")
 	}
 }

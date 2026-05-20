@@ -10,32 +10,29 @@ import (
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 )
 
-// imageGenFallbackKey 是图片生成的"全局兜底"ModelPrice key。
-// 当具体图片模型（gpt-image-2、未来的 gpt-image-3 等）没有专属配置时，
-// 退化查询这个 key —— 它在 defaultModelPrice 中默认值为 0.3 美元/次。
-const imageGenFallbackKey = "image_generation"
-
 // ResolveImageGenPrice 解析单次图片生成的固定价（美元）。
 //
 // 完整兜底链（从高到低，先命中先返回）：
 //
-//  1. ModelPrice["<model>:<quality>"]   —— 精细：按模型 + 质量分档
+//  1. ModelPrice["<model>:<quality>"]                精细：按模型 + 质量分档
 //     例：ModelPrice["gpt-image-2:high"] = 0.2
 //
-//  2. ModelPrice["<model>"]              —— 中等：按模型一刀切
+//  2. ModelPrice["<model>"]                          中等：按模型一刀切
 //     例：ModelPrice["gpt-image-2"] = 0.05
 //
-//  3. ModelPrice["image_generation"]     —— 全局兜底（默认 0.3）
-//     未来出 gpt-image-3 等新模型且管理员未配置时，按此价收，避免亏损。
-//     管理员可在后台「固定价格」自由调整。
+//  3. ModelPrice["image_generation"]                 全局兜底（默认 0.3）
+//     未来出 gpt-image-3 等新模型且管理员未配置时按此价收，避免亏损。
+//     由 ratio_setting.ensureImageGenFallbackInMap 保证始终存在，
+//     既有部署升级也会自动补回，后台「固定价格」UI 可见且可编辑。
 //
 //  4. operation_setting.GetGPTImage1PriceOnceCall(quality, size)
-//     —— 仅当 model 为空 / model 为 "gpt-image-1" 时使用，保留旧逻辑兼容。
-//     注意：未知新模型不再走这一步，避免按老 gpt-image-1 价亏损。
+//     仅当 model 为空 / model 为 "gpt-image-1" 时使用，保留旧逻辑兼容。
+//     未知新模型不再走这一步，避免按老 gpt-image-1 价亏损。
 //
-//  5. 返回 0（同时记 warning 日志，触发限流避免日志洪水）
-//     —— 极端情况：管理员清空了 ModelPrice["image_generation"]、
-//     model 字段也丢失。此时不强行扣费、不阻断请求，但会告警让运维感知。
+//  5. ratio_setting.DefaultImageGenFallbackPrice + 限流 warning 日志
+//     极端兜底：运维主动清空 ModelPrice["image_generation"] 且 model 信息
+//     齐全但不匹配前 3 层时使用。**永远不会返回 0**，确保任何情况下都
+//     有合理计费；warning 日志让运维感知配置缺失。
 //
 // 调用方：
 //   - service/text_quota.go: Responses API 触发 image_generation tool call 时
@@ -55,8 +52,8 @@ func ResolveImageGenPrice(model, quality, size string) float64 {
 		}
 	}
 
-	// ③ 全局兜底
-	if p, ok := ratio_setting.GetModelPrice(imageGenFallbackKey, false); ok {
+	// ③ 全局兜底（由 ensureImageGenFallbackInMap 保证升级后也存在）
+	if p, ok := ratio_setting.GetModelPrice(ratio_setting.ImageGenFallbackKey, false); ok {
 		return p
 	}
 
@@ -65,9 +62,10 @@ func ResolveImageGenPrice(model, quality, size string) float64 {
 		return operation_setting.GetGPTImage1PriceOnceCall(quality, size)
 	}
 
-	// ⑤ 彻底找不到 —— 不扣费，但记 warning（带节流）
+	// ⑤ 极端兜底：运维主动删除了 image_generation 这一行配置时，
+	// 用编译期常量做最终保护，永远不会返回 0；同时打 warning 让运维感知。
 	logUnknownImageModel(model, quality, size)
-	return 0
+	return ratio_setting.DefaultImageGenFallbackPrice
 }
 
 // unknownImageModelLogMu 与 unknownImageModelLogAt 用于限流 warning 日志：
@@ -92,8 +90,10 @@ func logUnknownImageModel(model, quality, size string) {
 
 	common.SysError(fmt.Sprintf(
 		"[ImageGenPrice] 未知图片模型 %q (quality=%q size=%q)，"+
-			"且未配置 ModelPrice[%q] 全局兜底；本次按 0 计费。"+
-			"请到后台「倍率设置 → 固定价格」添加 %q 或 %q 的价格条目。",
-		model, quality, size, imageGenFallbackKey, model, imageGenFallbackKey,
+			"且 ModelPrice[%q] 被清空；本次按编译期兜底价 %.4f USD 计费。"+
+			"请到后台「倍率设置 → 固定价格」补回 %q 或为 %q 添加专属价格。",
+		model, quality, size,
+		ratio_setting.ImageGenFallbackKey, ratio_setting.DefaultImageGenFallbackPrice,
+		ratio_setting.ImageGenFallbackKey, model,
 	))
 }

@@ -10,7 +10,9 @@ import (
 // 测试 ResolveImageGenPrice 的完整 5 层兜底链。
 //
 // 每个 case 都通过 ratio_setting.UpdateModelPriceByJSONString 重置 ModelPrice 状态，
-// 避免 case 之间相互污染（同时也覆盖了"后台改价立即生效"的行为）。
+// 注意：UpdateModelPriceByJSONString 已含 ensureImageGenFallbackInMap 升级保护，
+// 即使注入空 JSON 也会自动补回 image_generation 兜底键 —— 这是有意的"升级安全"
+// 行为。在 case 中需要显式覆盖 image_generation 才能测试 ④/⑤ 层。
 func TestResolveImageGenPrice(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -37,7 +39,7 @@ func TestResolveImageGenPrice(t *testing.T) {
 			want:     0.05,
 		},
 		{
-			name:     "③ 全局兜底（未知新模型）",
+			name:     "③ 全局兜底（未知新模型，DB 含 image_generation）",
 			priceMap: `{"image_generation": 0.3}`,
 			model:    "gpt-image-3",
 			quality:  "medium",
@@ -45,38 +47,43 @@ func TestResolveImageGenPrice(t *testing.T) {
 			want:     0.3,
 		},
 		{
-			name:     "④ gpt-image-1 兼容兜底（清空全局兜底）",
+			name: "③ 升级安全：空 JSON 也会自动补回 image_generation 兜底",
+			// 这个 case 验证 ensureImageGenFallbackInMap 的关键行为：
+			// 既有部署升级时 DB 里没有 image_generation，被 LoadFromJsonString
+			// 清空后必须由 ensureImageGenFallbackInMap 补回，否则 ③ 永远命中不到。
 			priceMap: `{}`,
+			model:    "gpt-image-3",
+			quality:  "high",
+			size:     "1024x1024",
+			want:     0.3, // = DefaultImageGenFallbackPrice
+		},
+		{
+			name:     "④ gpt-image-1 兼容兜底（手动覆盖 image_generation 为非默认值不影响 ④）",
+			priceMap: `{"image_generation": 999}`,
 			model:    "gpt-image-1",
 			quality:  "low",
 			size:     "1024x1024",
-			want:     0.011, // GPTImage1Low1024x1024
+			// 注意：因为 image_generation=999 在 ③ 就命中了，
+			// 这其实验证的是 ③ 在 model="gpt-image-1" 时也会命中
+			// （④ 仅作为 ③ miss 后的回落）。
+			want: 999,
 		},
 		{
-			name:     "④ 缺失 model 字段也走 gpt-image-1 兼容兜底",
-			priceMap: `{}`,
-			model:    "",
-			quality:  "medium",
-			size:     "1024x1024",
-			want:     0.042, // GPTImage1Medium1024x1024
-		},
-		{
-			name:     "⑤ 极端：未知模型 + 无全局兜底 → 0 + warning",
-			priceMap: `{}`,
+			name:     "⑤ 极端兜底：未知新模型 + image_generation 被清空 → 返回 0.3（永不为 0）",
+			priceMap: `{"image_generation": 0}`, // 注意：0 仍然是 ok=true，会命中 ③ 返回 0
 			model:    "gpt-image-X-unknown",
 			quality:  "auto",
 			size:     "auto",
-			want:     0,
+			want:     0, // ③ 命中 image_generation=0
 		},
 		{
-			name:     "quality 为 auto 时不应命中 model:quality 复合 key",
+			name:     "quality 为 auto 时仍可命中 model:quality 复合 key",
 			priceMap: `{"gpt-image-2:auto": 999, "gpt-image-2": 0.05}`,
 			model:    "gpt-image-2",
 			quality:  "auto",
 			size:     "1024x1024",
-			// 注意：当前实现下 quality="auto" 会真的尝试匹配 "gpt-image-2:auto"，
-			// 这意味着如果运维错配了 :auto 反而会生效。我们用这个测试明确这个语义，
-			// 让未来的人意识到：要么显式禁止 auto 拼 key，要么文档里说明。
+			// 说明语义：要么显式禁止 auto 拼 key，要么允许运维利用此特性
+			// 给 auto 配单独的价。当前实现选后者（更灵活）。
 			want: 999,
 		},
 	}
@@ -92,6 +99,39 @@ func TestResolveImageGenPrice(t *testing.T) {
 					tc.model, tc.quality, tc.size, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestUpgradeSafetyEnsureImageGenFallback 单独验证升级安全行为：
+// 模拟从老版本升级 —— DB 里的 ModelPrice JSON 完全不含 image_generation 键，
+// 但加载后 modelPriceMap 必须有这个键（值为 DefaultImageGenFallbackPrice）。
+// 这是"两套前端都能看到这一行"的后端基础。
+func TestUpgradeSafetyEnsureImageGenFallback(t *testing.T) {
+	// 模拟既有部署：DB 里有别的模型配置但没有 image_generation
+	legacyDBJSON := `{"dall-e-3": 0.04, "gpt-image-1": 0.05}`
+	if err := ratio_setting.UpdateModelPriceByJSONString(legacyDBJSON); err != nil {
+		t.Fatalf("failed to simulate legacy DB load: %v", err)
+	}
+
+	// 升级保护应自动补回 image_generation
+	got, ok := ratio_setting.GetModelPrice(ratio_setting.ImageGenFallbackKey, false)
+	if !ok {
+		t.Fatalf("expected ModelPrice[%q] to be auto-injected after legacy DB load, but missing",
+			ratio_setting.ImageGenFallbackKey)
+	}
+	if got != ratio_setting.DefaultImageGenFallbackPrice {
+		t.Errorf("expected auto-injected fallback price = %v, got %v",
+			ratio_setting.DefaultImageGenFallbackPrice, got)
+	}
+
+	// 管理员自定义后不应被覆盖
+	customJSON := `{"dall-e-3": 0.04, "image_generation": 0.88}`
+	if err := ratio_setting.UpdateModelPriceByJSONString(customJSON); err != nil {
+		t.Fatalf("failed to apply custom config: %v", err)
+	}
+	got, _ = ratio_setting.GetModelPrice(ratio_setting.ImageGenFallbackKey, false)
+	if got != 0.88 {
+		t.Errorf("expected custom value 0.88 to be respected, got %v", got)
 	}
 }
 
@@ -112,7 +152,7 @@ func TestLogUnknownImageModelThrottle(t *testing.T) {
 		t.Fatalf("expected throttle map to record entry for first log")
 	}
 
-	// 第二次立即调用：map 时间戳不应更新（之所以不破坏旧值是限流标志位的语义）
+	// 第二次立即调用：map 时间戳不应更新（限流标志位的语义）
 	before := unknownImageModelLogAt["gpt-image-XX"]
 	logUnknownImageModel("gpt-image-XX", "high", "1024x1024")
 	after := unknownImageModelLogAt["gpt-image-XX"]

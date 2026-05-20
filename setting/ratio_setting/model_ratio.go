@@ -312,8 +312,10 @@ var defaultModelPrice = map[string]float64{
 	// image_generation 是图片生成 tool call 的全局兜底（service.ResolveImageGenPrice）。
 	// 当请求触发图片生成、但 ModelPrice 中没有该图片模型（含 gpt-image-2 等）的具体配置时，
 	// 用这个兜底价计费，避免新模型未配置时按 gpt-image-1 老硬编码价静默扣款导致严重亏损。
-	// 0.3 美元/次是一个保守的"宁可贵勿亏"的兜底，部署后建议根据上游真实成本调整。
-	"image_generation": 0.3,
+	// 取值与 DefaultImageGenFallbackPrice 保持一致；既有部署升级时由
+	// ensureImageGenFallbackInMap 在 UpdateModelPriceByJSONString 加载后自动补回，
+	// 保证两套前端的「固定价格」UI 都能看到这一行进行可视化编辑（活配置）。
+	ImageGenFallbackKey: DefaultImageGenFallbackPrice,
 }
 
 var defaultAudioRatio = map[string]float64{
@@ -366,7 +368,34 @@ func ModelPrice2JSONString() string {
 }
 
 func UpdateModelPriceByJSONString(jsonStr string) error {
-	return types.LoadFromJsonStringWithCallback(modelPriceMap, jsonStr, InvalidateExposedDataCache)
+	if err := types.LoadFromJsonStringWithCallback(modelPriceMap, jsonStr, InvalidateExposedDataCache); err != nil {
+		return err
+	}
+	// 升级安全：types.LoadFromJsonString 是"清空后重建"语义，会把启动时
+	// AddAll(defaultModelPrice) 注入的兜底键擦除掉。对于既有部署升级，
+	// DB 里的 ModelPrice JSON 不会含这些新增的 default key —— 这里显式
+	// 补回 image_generation 兜底键，保证 service.ResolveImageGenPrice 的
+	// 兜底链能命中，且后台「固定价格」UI 中也能看见这一行进行可视化编辑。
+	ensureImageGenFallbackInMap()
+	return nil
+}
+
+// ImageGenFallbackKey 是图片生成 tool call 全局兜底价的 ModelPrice key。
+// 对应 service.ResolveImageGenPrice 兜底链的第 ③ 层。
+const ImageGenFallbackKey = "image_generation"
+
+// DefaultImageGenFallbackPrice 是 image_generation 兜底键的默认价格（USD/次）。
+// 同时被 defaultModelPrice 和 ensureImageGenFallbackInMap 共享，保持单一真相源。
+const DefaultImageGenFallbackPrice = 0.3
+
+// ensureImageGenFallbackInMap 保证 modelPriceMap 中始终存在
+// image_generation 兜底键。已存在则不动，避免覆盖管理员的自定义值。
+func ensureImageGenFallbackInMap() {
+	if _, ok := modelPriceMap.Get(ImageGenFallbackKey); ok {
+		return
+	}
+	modelPriceMap.Set(ImageGenFallbackKey, DefaultImageGenFallbackPrice)
+	InvalidateExposedDataCache()
 }
 
 // GetModelPrice 返回模型的价格，如果模型不存在则返回-1，false

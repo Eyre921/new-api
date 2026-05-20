@@ -308,6 +308,12 @@ var defaultModelPrice = map[string]float64{
 	"veo-3.0-fast-generate-001":      0.15,
 	"veo-3.1-generate-preview":       0.4,
 	"veo-3.1-fast-generate-preview":  0.15,
+
+	// image_generation 是图片生成 tool call 的全局兜底（service.ResolveImageGenPrice）。
+	// 当请求触发图片生成、但 ModelPrice 中没有该图片模型（含 gpt-image-2 等）的具体配置时，
+	// 用这个兜底价计费，避免新模型未配置时按 gpt-image-1 老硬编码价静默扣款导致严重亏损。
+	// 0.3 美元/次是一个保守的"宁可贵勿亏"的兜底，部署后建议根据上游真实成本调整。
+	"image_generation": 0.3,
 }
 
 var defaultAudioRatio = map[string]float64{

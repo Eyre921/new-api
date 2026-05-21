@@ -54,6 +54,12 @@ const (
 
 	ContextKeyLocalCountTokens ContextKey = "local_count_tokens"
 
+	// ContextKeyResponsesImageGen is set to true when the inbound /v1/responses
+	// request's tools include type=image_generation. Channel selection uses it
+	// to filter out channels whose OtherSettings.ResponsesImageGeneration is
+	// explicitly false.
+	ContextKeyResponsesImageGen ContextKey = "responses_image_gen_required"
+
 	ContextKeySystemPromptOverride ContextKey = "system_prompt_override"
 
 	// ContextKeyFileSourcesToCleanup stores file sources that need cleanup when request ends

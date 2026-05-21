@@ -41,6 +41,8 @@ type ChannelOtherSettings struct {
 	UpstreamModelUpdateLastDetectedModels []string      `json:"upstream_model_update_last_detected_models,omitempty"` // 上次检测到的可加入模型
 	UpstreamModelUpdateLastRemovedModels  []string      `json:"upstream_model_update_last_removed_models,omitempty"`  // 上次检测到的可删除模型
 	UpstreamModelUpdateIgnoredModels      []string      `json:"upstream_model_update_ignored_models,omitempty"`       // 手动忽略的模型
+	// nil = 视作支持（兼容存量渠道），显式 false 才会被 /v1/responses + image_generation 请求过滤掉。
+	ResponsesImageGeneration *bool `json:"responses_image_generation,omitempty"`
 }
 
 func (s *ChannelOtherSettings) IsOpenRouterEnterprise() bool {
@@ -48,4 +50,14 @@ func (s *ChannelOtherSettings) IsOpenRouterEnterprise() bool {
 		return false
 	}
 	return *s.OpenRouterEnterprise
+}
+
+// SupportsResponsesImageGeneration 返回该渠道是否声明支持 Responses API 的
+// image_generation 工具。未设置时默认支持。
+// 使用值接收器以支持 channel.GetOtherSettings().SupportsResponsesImageGeneration() 调用链。
+func (s ChannelOtherSettings) SupportsResponsesImageGeneration() bool {
+	if s.ResponsesImageGeneration == nil {
+		return true
+	}
+	return *s.ResponsesImageGeneration
 }

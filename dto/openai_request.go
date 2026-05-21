@@ -947,6 +947,17 @@ func (r *OpenAIResponsesRequest) GetToolsMap() []map[string]any {
 	return toolsMap
 }
 
+// HasImageGenerationTool reports whether the request's tools include the
+// OpenAI Responses API image_generation tool.
+func (r *OpenAIResponsesRequest) HasImageGenerationTool() bool {
+	for _, tool := range r.GetToolsMap() {
+		if t, ok := tool["type"].(string); ok && t == "image_generation" {
+			return true
+		}
+	}
+	return false
+}
+
 type Reasoning struct {
 	Effort  string `json:"effort,omitempty"`
 	Summary string `json:"summary,omitempty"`

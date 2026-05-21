@@ -74,6 +74,10 @@ export const channelFormSchema = z.object({
   allow_inference_geo: z.boolean().optional(), // OpenAI/Anthropic: inference geography
   allow_speed: z.boolean().optional(), // Anthropic: speed mode control
   claude_beta_query: z.boolean().optional(), // Anthropic: beta query passthrough
+  // OpenAI/compat: declare whether this channel actually generates images
+  // when /v1/responses is called with tools=[{type:"image_generation"}].
+  // false → channel is excluded from such requests. Default (undefined) = supports.
+  responses_image_generation: z.boolean().optional(),
   // Upstream model update settings (stored in settings JSON)
   upstream_model_update_check_enabled: z.boolean().optional(),
   upstream_model_update_auto_sync_enabled: z.boolean().optional(),
@@ -132,6 +136,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   allow_inference_geo: false,
   allow_speed: false,
   claude_beta_query: false,
+  responses_image_generation: true,
   upstream_model_update_check_enabled: false,
   upstream_model_update_auto_sync_enabled: false,
   upstream_model_update_ignored_models: '',
@@ -186,6 +191,7 @@ export function transformChannelToFormDefaults(
   let allowInferenceGeo = false
   let allowSpeed = false
   let claudeBetaQuery = false
+  let responsesImageGeneration = true
   let upstreamModelUpdateCheckEnabled = false
   let upstreamModelUpdateAutoSyncEnabled = false
   let upstreamModelUpdateIgnoredModels = ''
@@ -204,6 +210,8 @@ export function transformChannelToFormDefaults(
       allowInferenceGeo = parsed.allow_inference_geo === true
       allowSpeed = parsed.allow_speed === true
       claudeBetaQuery = parsed.claude_beta_query === true
+      // Unset / undefined = supported. Only an explicit `false` flips the toggle off.
+      responsesImageGeneration = parsed.responses_image_generation !== false
       upstreamModelUpdateCheckEnabled =
         parsed.upstream_model_update_check_enabled === true
       upstreamModelUpdateAutoSyncEnabled =
@@ -258,6 +266,7 @@ export function transformChannelToFormDefaults(
     allow_inference_geo: allowInferenceGeo,
     allow_speed: allowSpeed,
     claude_beta_query: claudeBetaQuery,
+    responses_image_generation: responsesImageGeneration,
     allow_safety_identifier: allowSafetyIdentifier,
     upstream_model_update_check_enabled: upstreamModelUpdateCheckEnabled,
     upstream_model_update_auto_sync_enabled: upstreamModelUpdateAutoSyncEnabled,
@@ -340,6 +349,13 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     settingsObj.allow_include_obfuscation =
       formData.allow_include_obfuscation === true
     settingsObj.allow_inference_geo = formData.allow_inference_geo === true
+    // Persist responses_image_generation only when admin explicitly turned it
+    // off; the default (supports) stays implicit so payloads remain clean.
+    if (formData.responses_image_generation === false) {
+      settingsObj.responses_image_generation = false
+    } else if ('responses_image_generation' in settingsObj) {
+      delete settingsObj.responses_image_generation
+    }
   } else {
     if ('disable_store' in settingsObj) delete settingsObj.disable_store
     if ('allow_safety_identifier' in settingsObj)

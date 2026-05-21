@@ -99,8 +99,16 @@ func Distribute() func(c *gin.Context) {
 					}
 				}
 
+				requireResponsesImageGen := common.GetContextKeyBool(c, constant.ContextKeyResponsesImageGen)
+
 				if preferredChannelID, found := service.GetPreferredChannelByAffinity(c, modelRequest.Model, usingGroup); found {
 					preferred, err := model.CacheGetChannel(preferredChannelID)
+					// Drop affinity preference when the request needs Responses image_generation
+					// but the preferred channel has the capability explicitly disabled.
+					if requireResponsesImageGen && err == nil && preferred != nil &&
+						!preferred.GetOtherSettings().SupportsResponsesImageGeneration() {
+						preferred = nil
+					}
 					if err == nil && preferred != nil {
 						if preferred.Status != common.ChannelStatusEnabled {
 							if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
@@ -129,10 +137,11 @@ func Distribute() func(c *gin.Context) {
 
 				if channel == nil {
 					channel, selectGroup, err = service.CacheGetRandomSatisfiedChannel(&service.RetryParam{
-						Ctx:        c,
-						ModelName:  modelRequest.Model,
-						TokenGroup: usingGroup,
-						Retry:      common.GetPointer(0),
+						Ctx:                      c,
+						ModelName:                modelRequest.Model,
+						TokenGroup:               usingGroup,
+						Retry:                    common.GetPointer(0),
+						RequireResponsesImageGen: requireResponsesImageGen,
 					})
 					if err != nil {
 						showGroup := usingGroup
@@ -338,6 +347,16 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 
 	if strings.HasPrefix(c.Request.URL.Path, "/v1/responses/compact") && modelRequest.Model != "" {
 		modelRequest.Model = ratio_setting.WithCompactModelSuffix(modelRequest.Model)
+	}
+
+	if shouldSelectChannel && strings.HasPrefix(c.Request.URL.Path, "/v1/responses") &&
+		strings.HasPrefix(c.Request.Header.Get("Content-Type"), "application/json") {
+		var respReq dto.OpenAIResponsesRequest
+		if parseErr := common.UnmarshalBodyReusable(c, &respReq); parseErr == nil {
+			if respReq.HasImageGenerationTool() {
+				common.SetContextKey(c, constant.ContextKeyResponsesImageGen, true)
+			}
+		}
 	}
 	return &modelRequest, shouldSelectChannel, nil
 }

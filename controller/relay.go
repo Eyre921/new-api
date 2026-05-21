@@ -179,10 +179,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}()
 
 	retryParam := &service.RetryParam{
-		Ctx:        c,
-		TokenGroup: relayInfo.TokenGroup,
-		ModelName:  relayInfo.OriginModelName,
-		Retry:      common.GetPointer(0),
+		Ctx:                      c,
+		TokenGroup:               relayInfo.TokenGroup,
+		ModelName:                relayInfo.OriginModelName,
+		Retry:                    common.GetPointer(0),
+		RequireResponsesImageGen: common.GetContextKeyBool(c, constant.ContextKeyResponsesImageGen),
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
@@ -507,10 +508,11 @@ func RelayTask(c *gin.Context) {
 	}()
 
 	retryParam := &service.RetryParam{
-		Ctx:        c,
-		TokenGroup: relayInfo.TokenGroup,
-		ModelName:  relayInfo.OriginModelName,
-		Retry:      common.GetPointer(0),
+		Ctx:                      c,
+		TokenGroup:               relayInfo.TokenGroup,
+		ModelName:                relayInfo.OriginModelName,
+		Retry:                    common.GetPointer(0),
+		RequireResponsesImageGen: common.GetContextKeyBool(c, constant.ContextKeyResponsesImageGen),
 	}
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {

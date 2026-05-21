@@ -105,6 +105,9 @@ export interface ChannelOtherSettings {
   upstream_model_update_ignored_models?: string[]
   upstream_model_update_last_check_time?: number
   upstream_model_update_last_detected_models?: string[]
+  // nil/undefined = supports by default; set to false to exclude this channel
+  // from /v1/responses requests whose tools include image_generation.
+  responses_image_generation?: boolean
 }
 
 // ============================================================================
